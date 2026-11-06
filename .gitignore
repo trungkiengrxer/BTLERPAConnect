@@ -1,0 +1,32 @@
+# Xcode
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# Local build dependencies
+Lilu.kext/
+MacKernelSDK/
+
+# Build artifacts
+*.kext
+*.dSYM
+*.zip
+
+# Local backups
+*.bak
+*.backup
+
+# Reverse-engineering artifacts
+bluetoothd*
+*.asm
+*-objc.txt
+*-symbols.txt
+
+# Python
+__pycache__/
+
+# macOS
+.DS_Store
