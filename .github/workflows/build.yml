@@ -1,0 +1,97 @@
+# Builds the kext on every push and pull request. Pushing a tag vX.Y.Z
+# (matching MODULE_VERSION in the Xcode project) publishes a GitHub release
+# with the RELEASE and DEBUG zips and their SHA-256 checksums.
+#
+#   git tag v0.3.1 && git push origin v0.3.1
+
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PRODUCT: BTLERPAConnect
+  LILU_VERSION: 1.7.2
+  MACKERNELSDK_REF: 05094e5e88cec7caedbfb35e8449ed0db94bf95b
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch Lilu SDK and MacKernelSDK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$LILU_VERSION" -R acidanthera/Lilu -p "Lilu-$LILU_VERSION-DEBUG.zip" -D "$RUNNER_TEMP/lilu"
+          unzip -q "$RUNNER_TEMP/lilu/Lilu-$LILU_VERSION-DEBUG.zip" -d "$RUNNER_TEMP/lilu"
+          cp -R "$RUNNER_TEMP/lilu/Lilu.kext" .
+          git clone --quiet https://github.com/acidanthera/MacKernelSDK.git
+          git -C MacKernelSDK checkout --quiet "$MACKERNELSDK_REF"
+
+      - name: Read version
+        id: version
+        run: |
+          version=$(grep -m1 -oE 'MODULE_VERSION = [0-9.]+' "$PRODUCT.xcodeproj/project.pbxproj" | awk '{print $3}')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match MODULE_VERSION $version"
+            exit 1
+          fi
+
+      - name: Compile the page patcher test against all build tables
+        run: clang++ -std=c++14 -Wall -Werror -I "$PRODUCT" tools/test_apply.cpp -o "$RUNNER_TEMP/test_apply"
+
+      - name: Build
+        run: |
+          for configuration in Release Debug; do
+            xcodebuild -project "$PRODUCT.xcodeproj" -target "$PRODUCT" -configuration "$configuration" \
+              SYMROOT="$PWD/build" build
+          done
+          mkdir dist
+          cp build/Release/*.zip build/Debug/*.zip dist/
+          cd dist
+          for zip in *.zip; do shasum -a 256 "$zip" > "$zip.sha256"; done
+          cat *.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PRODUCT }}-${{ steps.version.outputs.version }}
+          path: dist/*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          changes=$(grep -m1 -F -- "- **$VERSION**:" README.md | sed -E 's/^- \*\*[^*]+\*\*: //')
+          {
+            echo "## $PRODUCT $VERSION"
+            echo
+            echo "${changes:-See the changelog in README.md.}"
+            echo
+            echo "### Installation"
+            echo
+            echo "1. Extract \`$PRODUCT.kext\` from \`$PRODUCT-$VERSION-RELEASE.zip\` (the DEBUG zip is for logging with the debug boot argument)."
+            echo "2. Delete the old \`EFI/OC/Kexts/$PRODUCT.kext\`, copy the new one in, and keep it in \`Kernel -> Add\` after \`Lilu.kext\`."
+            echo "3. Reboot and check \`kmutil showloaded | grep $PRODUCT\`."
+            echo
+            echo "Supported macOS builds: see the Compatibility section of README.md. On any other build the kext loads and patches nothing."
+            echo
+            echo "### SHA-256"
+            echo
+            echo '```'
+            cat dist/*.sha256
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+            --title "$PRODUCT $VERSION" --notes-file "$RUNNER_TEMP/notes.md"

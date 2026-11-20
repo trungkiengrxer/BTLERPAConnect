@@ -8,6 +8,9 @@
 #   ADV_TYPE          legacy advertising type requested by bluetoothd
 #   CONN_IN_PROGRESS  lConnectionInProgress (LE_CreateConn pending)
 #   SILENT_RESTART    stop + resend params + enable, if advertising
+#   RESTART_OWNER     object passed to bluetoothd's restart function
+#   STRING_INIT       std::string(const char *)
+#   BT_RESTART        "Bluetooth error - restarting" (noreturn)
 #   TABLE             start of the state below
 #
 # The stack slots used by connectStart (-0x40) and connComplete (-0xa8) are
@@ -18,8 +21,9 @@
 #     +0  identity address (type byte + 6 bytes, as stored by bluetoothd)
 #     +7  last RPA seen for it (type 1 + 6 bytes), written by LE_ResolveAddress
 #     +14 RPA put in the controller accept list (used again for the removal)
-#   LINKS     number of LE links up
-#   CUR_TYPE  advertising type last sent to the controller
+#   LINKS        number of LE links up
+#   CUR_TYPE     advertising type last sent to the controller
+#   XPORT_FAILS  HCI writes that failed with 0x4B5 (see sendFailed)
 
 # The addresses in the comments below are those of 25G72, kept as a guide.
 
@@ -27,6 +31,7 @@
 .set ENTRY,             24
 .set LINKS,             TABLE + ENTRIES * ENTRY
 .set CUR_TYPE,          LINKS + 1
+.set XPORT_FAILS,       CUR_TYPE + 1
 
 .text
 .globl base
@@ -226,3 +231,39 @@ findEntry:
     jb      1b
     xorl    %eax, %eax
 3:  ret
+
+# 0x10017f39f, an HCI command could not be sent; replaces:
+#   cmpl $0xc35, %r15d                     (the je after it is kept)
+# ebx = status. 0x4B5 (1205) means the write to the USB transport failed.
+# When the Mac wakes, the BCM20702 is often removed and re-enumerated
+# (BrcmPatchRAM uploads the firmware again). bluetoothd sometimes keeps the
+# dead transport and its ManagerStateWatchdog does not fire, so every
+# command fails, LeBroadcaster retries advertising in a busy loop (150-250%
+# CPU) and Bluetooth stays dead. After 3 such failures, restart bluetoothd
+# the same way its UHE and watchdog checks do; the new process opens the
+# re-enumerated device.
+sendFailed:
+    cmpl    $0x4B5, %ebx
+    jne     1f
+    incb    base + (XPORT_FAILS - CAVE)(%rip)
+    cmpb    $3, base + (XPORT_FAILS - CAVE)(%rip)
+    jb      1f
+    # site has rsp = 0 mod 16; return address + rbp + 0x30 keep it aligned
+    pushq   %rbp
+    movq    %rsp, %rbp
+    subq    $0x30, %rsp
+    call    base + (RESTART_OWNER - CAVE)
+    movq    %rax, -0x8(%rbp)
+    leaq    transportLost(%rip), %rsi
+    leaq    -0x30(%rbp), %rdi
+    call    base + (STRING_INIT - CAVE)
+    movq    -0x8(%rbp), %rdi
+    movl    $0x28E, %esi
+    leaq    -0x30(%rbp), %rdx
+    xorl    %ecx, %ecx
+    call    base + (BT_RESTART - CAVE)
+    ud2
+1:  cmpl    $0xC35, %r15d
+    ret
+transportLost:
+    .asciz  "HCI transport lost (BTLERPAConnect)"

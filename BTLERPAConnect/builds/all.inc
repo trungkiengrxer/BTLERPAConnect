@@ -2,8 +2,10 @@
 
 #include "25G332.inc"
 #include "25G342.inc"
+#include "25G72.inc"
 
 static const BluetoothdBuild bluetoothdBuilds[] {
     BLUETOOTHD_BUILD_25G332
     BLUETOOTHD_BUILD_25G342
+    BLUETOOTHD_BUILD_25G72
 };

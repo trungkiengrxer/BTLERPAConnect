@@ -33,10 +33,10 @@ CAVE_SRC = ROOT / "docs" / "cave.s"
 
 # Shared layout of the zero padding after __eh_frame (both kexts rely on it):
 #   __eh_frame + 0x060 .. + 0x180   BTLEAdvFix routine
-#   __eh_frame + 0x180 .. + 0x360   BTLERPAConnect routines
+#   __eh_frame + 0x180 .. + 0x400   BTLERPAConnect routines
 CAVE_OFFSET = 0x180
-CAVE_LIMIT = 0x360
-STATE_SIZE = 16 * 24 + 2
+CAVE_LIMIT = 0x400
+STATE_SIZE = 16 * 24 + 3
 
 # LEHardwareModel::readCurrentUHEModeCB, failure path:
 #   jmp +2; xorl %eax, %eax; movb %al, mode(%rip)     xorl -> movb $0x2, %al
@@ -67,7 +67,18 @@ SITES = [
     ("accept list add RPA", "49 89 C6 41 0F B6 17 49 8D 4F 01 48 8D 35 ?? ?? ?? ??", 3, 8, "acceptAdd", 1),
     # accept list remove: same with movq %rax, %rbx
     ("accept list remove RPA", "48 89 C3 41 0F B6 17 49 8D 4F 01 48 8D 35 ?? ?? ?? ??", 3, 8, "acceptRemove", 1),
+    # HCI command could not be sent (ebx = status):
+    #   movl $0x275, %ebx; cmpl $0xc35, %r15d; je ...
+    ("restart on lost HCI transport", "BB 75 02 00 00 41 81 FF 35 0C 00 00 0F 84 ?? ?? ?? ??", 5, 7, "sendFailed", 1),
 ]
+
+# bluetoothd restarting itself after "FW is in UHE Mode" (any other restart
+# with the same shape would do; all of them must agree):
+#   call OWNER; movq %rax, %rbx; leaq msg(%rip), %rsi; leaq -0x30(%rbp), %r14;
+#   movq %r14, %rdi; call STRING_INIT; movq %rbx, %rdi; movl $0x28e, %esi;
+#   movq %r14, %rdx; xorl %ecx, %ecx; call BT_RESTART; ud2
+BT_RESTART_CALL = ("E8 ?? ?? ?? ?? 48 89 C3 48 8D 35 ?? ?? ?? ?? 4C 8D 75 D0 4C 89 F7 E8 ?? ?? ?? ?? "
+                   "48 89 DF BE 8E 02 00 00 4C 89 F2 31 C9 E8 ?? ?? ?? ?? 0F 0B")
 
 ADV_PARAMS_COMMAND = bytes.fromhex("BF A6 00 00 00")     # movl $0xa6, %edi
 
@@ -112,6 +123,13 @@ def port(binary):
     if conn != binary.rip_target(cip + 20, cip + 25):
         raise PortError("lConnectionInProgress: test and set use different variables")
 
+    targets = set()
+    for hit in binary.find(BT_RESTART_CALL):
+        targets.add(tuple(binary.va(hit + at + 4 + binary.i32(hit + at)) for at in (1, 23, 41)))
+    if len(targets) != 1:
+        raise PortError(f"bluetoothd restart call: found {len(targets)} different call targets, expected 1")
+    owner, string_init, bt_restart = targets.pop()
+
     eh_addr, eh_size = binary.sections[("__TEXT", "__eh_frame")]
     eh = binary.off(eh_addr)
     cave = eh + CAVE_OFFSET
@@ -127,7 +145,8 @@ def port(binary):
         raise PortError("no zero-filled room after the last __DATA section")
 
     symbols = {"CAVE": binary.va(cave), "ADV_TYPE": adv_type, "CONN_IN_PROGRESS": conn,
-               "SILENT_RESTART": restart, "TABLE": table}
+               "SILENT_RESTART": restart, "RESTART_OWNER": owner, "STRING_INIT": string_init,
+               "BT_RESTART": bt_restart, "TABLE": table}
     for key, value in symbols.items():
         notes.append(f"{key} = 0x{value:x}")
     code, labels = assemble(CAVE_SRC, symbols, "base", link_at=binary.va(cave))
