@@ -1,12 +1,12 @@
 # BTLERPAConnect
 
-A [Lilu](https://github.com/acidanthera/Lilu) plugin that makes **Instant Hotspot** work on Hackintoshes with a Broadcom **BCM20702** Bluetooth 4.0 controller (for example the Dell **DW1560**) under **macOS Tahoe 26.6**.
+A [Lilu](https://github.com/acidanthera/Lilu) plugin that makes **Instant Hotspot** work on Hackintoshes with a Broadcom **BCM20702** Bluetooth 4.0 controller (for example the Dell **DW1560**) under **macOS Tahoe**.
 
 It patches `/usr/sbin/bluetoothd` at runtime so that the Mac can open a Bluetooth LE connection to the iPhone, which Instant Hotspot needs before it can ask the iPhone to turn on Personal Hotspot.
 
 It is a companion to [BTLEAdvFix](https://github.com/trungkiengrxer/BTLEAdvFix), which fixes BLE advertising and AirDrop to older iPhones. The two plugins patch different code and can be used together.
 
-> Unofficial project. Not affiliated with Apple, Dell or Broadcom. The patches are tied to one exact `bluetoothd` build and are ignored on any other build.
+> Unofficial project. Not affiliated with Apple, Dell or Broadcom. Each supported macOS build has its own generated patch table; on any other build the plugin does nothing.
 
 ## Tested hardware and software
 
@@ -18,6 +18,17 @@ It is a companion to [BTLEAdvFix](https://github.com/trungkiengrxer/BTLEAdvFix),
 | macOS | Tahoe 26.6 (`25G72`), Intel x86_64 |
 | Bluetooth kexts | Lilu 1.7.2, BlueToolFixup / BrcmPatchRAM3 2.7.2, BTLEAdvFix 0.2.1 |
 | iPhone | iPhone 7 Plus on iOS 15.8.3 |
+
+Second machine (0.3.0):
+
+| Item | Value |
+|------|-------|
+| Bluetooth card | Fenvi T919 (BCM94360 Wi-Fi + BCM20702 Bluetooth) |
+| Bluetooth chipset | `BCM20702A0`, USB `0b05:180a`, ROM firmware v8718, no BrcmPatchRAM |
+| SMBIOS | `MacPro7,1` |
+| macOS | Tahoe 26.7.2 (`25G332`) and 26.7.3 (`25G342`), Intel x86_64, OCLP-CustoMac 3.0.3 "Modern Wireless" |
+| Bluetooth kexts | Lilu 1.7.2, BlueToolFixup 2.7.2, BTLEAdvFix 0.3.0 |
+| Devices | iPhone on iOS 27.2, Apple Watch Series 4 on watchOS 10.6.2 |
 
 ## Problem
 
@@ -84,9 +95,9 @@ bluetoothd itself can resolve RPAs in software (it does so for every advertiseme
 
 ## How it works
 
-All patches are applied in `cs_validate_page` to pages of `/usr/sbin/bluetoothd`, as BTLEAdvFix does. A page that does not contain the exact expected bytes is left alone. The added routines are in [`docs/cave.s`](docs/cave.s). They live in the zero padding after `__eh_frame` (after BTLEAdvFix's routine), and keep their state (386 bytes) in unused space at the end of `__DATA`.
+All patches are applied in `cs_validate_page` to pages of `/usr/sbin/bluetoothd`, as BTLEAdvFix does. The kext picks a generated table by the running macOS build, checks the `LC_UUID` of `bluetoothd`, and writes each patch only at its exact file offset over its exact original bytes; on a build without a table nothing is patched. The added routines are in [`docs/cave.s`](docs/cave.s). They live in the zero padding after `__eh_frame` (at `__eh_frame + 0x180`, after the range reserved for BTLEAdvFix's routine), and keep their state (386 bytes) in unused space at the end of `__DATA`.
 
-| # | Address (25G72) | Change |
+| # | Address (25G72; other builds: see `BTLERPAConnect/builds/`) | Change |
 |---|-----------------|--------|
 | 1 | `0x10033cbfd` | `readCurrentUHEModeCB`: on failure store mode `2` (normal) instead of `0`. No more false restarts. |
 | 2 | `0x1001f5c66`, `0x1001f6693` | Where `LE_Set_Advertising_Parameters` is built: if bluetoothd asks for `ADV_IND` while an `LE_Create_Connection` is pending (`lConnectionInProgress`) or an LE link is up, send `ADV_SCAN_IND` instead. The interval is raised to at least `0xA0`, which Bluetooth 4.0 requires for `ADV_SCAN_IND`. Otherwise advertising stays connectable. |
@@ -176,23 +187,25 @@ To look at the HCI commands themselves, record a trace as described in the [BTLE
 
 ## Porting to another macOS build
 
-The patches match the exact bytes of `bluetoothd` in macOS 26.6 (25G72). After a macOS update, run:
+Nothing in the kext source is tied to a build. The build-specific bytes live in generated tables, one per macOS build, in `BTLERPAConnect/builds/`. To add a build, take a **clean** copy of its `/usr/sbin/bluetoothd` and run:
 
 ```bash
-python3 tools/check_patterns.py
+python3 tools/port.py /path/to/bluetoothd 25G332
 ```
 
-It checks that:
+then rebuild the kext. While the kext is active, reads of `/usr/sbin/bluetoothd` can return patched pages, so make the copy after booting with `-blrpaoff` (or on a build the kext does not know, where it is inactive anyway).
 
-- every in-place pattern matches exactly once and stays within one 4 KiB page;
-- the `__eh_frame` anchor is unique and the cave after it is free;
-- the routine bytes in `kern_start.cpp` equal `docs/cave.s` assembled and linked at `0x100aa2440`;
-- every inserted `call` lands on its routine, and the only call out of the cave goes to the silent restart function;
-- no branch anywhere in `__text` lands inside replaced bytes.
+`tools/port.py`:
 
-A running BTLERPAConnect patches the page cache, so `/usr/sbin/bluetoothd` then reads back patched. Run the check after booting with `-blrpaoff`, or pass a copy of the original binary as the first argument.
+- finds the ten patch sites by signature; bytes that change between builds (rip-relative displacements, call and branch distances) are wildcards;
+- finds by signature the addresses the routines need (`ADV_TYPE`, `lConnectionInProgress`, the silent restart function) and passes them to [`docs/cave.s`](docs/cave.s), which is assembled and linked at `__eh_frame + 0x180`;
+- puts the 386 bytes of state after the last section of `__DATA`, in the zero-filled tail of the segment;
+- refuses to write anything unless every signature matches the expected number of times, both advertising-parameter sites read the same variable, the routine and state areas are free, and no other branch in `__text` lands inside replaced bytes;
+- writes `builds/<build>.inc` with the slice offset, the `LC_UUID` and, for each patch, its file offset, original bytes and replacement bytes.
 
-To port, find the same places in the new build. Useful strings:
+`python3 tools/port.py --check <bluetoothd> <build>` regenerates a table in memory and compares it with the committed one.
+
+If a signature no longer matches, find the same places in the new build and update the signatures in `tools/port.py`. Useful strings:
 
 | Patch | Search for |
 |-------|------------|
@@ -204,7 +217,7 @@ To port, find the same places in the new build. Useful strings:
 | 5 | callers of `LE_ResolveUsingIRK` |
 | 6 | `Could not add device to filter accept list`, `Could not remove device from filter accept list` (command indices `0xb1`, `0xb2`) |
 
-Then update the addresses in [`docs/cave.s`](docs/cave.s), rebuild its bytes, and update `kern_start.cpp` and `tools/check_patterns.py`.
+The routines assume the registers and stack slots visible in the signatures (`%r14w`/`%r13w` and `-0x40(%rbp)` in the connect paths, `-0xa8(%rbp)` in the connection complete callback). A build that changes them does not match and is not ported.
 
 ## Building
 
@@ -230,22 +243,37 @@ xcodebuild \
   build
 ```
 
-The kext and a release zip are written to `build/Release`. To rebuild the routine bytes:
+The kext and a release zip are written to `build/Release`.
+
+The code that patches a page has no kernel dependencies (`BTLERPAConnect/page_patcher.hpp`), so it can be run against a real binary before booting with it:
 
 ```bash
-clang -c -arch x86_64 docs/cave.s -o /tmp/cave.o
-ld -arch x86_64 -preload -e base -segaddr __TEXT 0x100aa2440 /tmp/cave.o -o /tmp/cave.bin
-otool -tV /tmp/cave.bin
+clang++ -std=c++14 -I BTLERPAConnect tools/test_apply.cpp -o /tmp/test_apply
+/tmp/test_apply <clean bluetoothd> 25G332 /tmp/bluetoothd.patched
 ```
 
 ## Compatibility
 
-Currently verified only on:
+Verified on:
 
-- Dell DW1560 / BCM20702A3 Bluetooth
-- macOS Tahoe 26.6 (25G72)
-- Intel x86_64
-- iPhone on iOS 15.8.3
+| macOS | Build | Bluetooth | Devices | Version |
+|-------|-------|-----------|---------|---------|
+| Tahoe 26.6 | `25G72` | Dell DW1560 / BCM20702A3 | iPhone on iOS 15.8.3 | 0.2.1 only, see below |
+| Tahoe 26.7.2 | `25G332` | Fenvi T919 / BCM20702A0 | iPhone on iOS 27.2, Apple Watch Series 4 on watchOS 10.6.2 | 0.3.0 |
+| Tahoe 26.7.3 | `25G342` | same machine | same | 0.3.0 |
+
+`25G72` has no table in 0.3.0 yet: generating it needs a clean copy of that build's `bluetoothd` (`python3 tools/port.py <bluetoothd> 25G72`). On a build without a table the kext loads and does nothing.
+
+Results on that machine, together with BTLEAdvFix 0.3.0 (Instant Hotspot and AirDrop checked again on 26.7.3):
+
+| Feature | Result |
+|---------|--------|
+| Instant Hotspot | works |
+| AirDrop Mac <-> iPhone (iOS 27.2) | works in both directions, no bluetoothd restarts |
+| Auto Unlock with Apple Watch | works. One-time fix needed on that machine: the watch's `BluetoothLE` record in the System keychain had no IRK, so its RPA never resolved; deleting the record and rebooting Mac and watch let cloud pairing recreate it |
+| bluetoothd restarts (reason 654) | none |
+
+On 26.7.2 the code sites moved by `+0x590` compared to 25G72 and the `__DATA` addresses stayed the same; the routines are unchanged. On 26.7.3 only `__eh_frame` (and so the routine area) moved, by `+0x18`.
 
 Other BCM20702 cards have the same Bluetooth 4.0 limits and are likely affected in the same way, but have not been tested. Cards with an Apple Bluetooth module (for example BCM94360NG/CS2) do not need this plugin.
 
@@ -261,12 +289,13 @@ Other BCM20702 cards have the same Bluetooth 4.0 limits and are likely affected 
 
 This project patches executable code of a system daemon at runtime and adds routines that call into it.
 
-A mismatched macOS build is ignored by design: patterns simply do not match. Even so, any patch to `bluetoothd` can cause Bluetooth instability.
+An unsupported macOS build is ignored by design: the kext has no table for it and does not search for patterns at runtime. Even so, any patch to `bluetoothd` can cause Bluetooth instability.
 
 Keep a working EFI backup, and keep a reliable way to disable the plugin: the `-blrpaoff` boot argument or removing the kext.
 
 ## Changelog
 
+- **0.3.0**: build-independent sources. Patch sites and addresses are found by signature with `tools/port.py`, which generates one table per macOS build (`BTLERPAConnect/builds/`); the kext picks the table by macOS build, checks the `LC_UUID` of `bluetoothd` and never patches an unknown build. The routines moved to `__eh_frame + 0x180` to leave room for BTLEAdvFix 0.3.0. Added macOS 26.7.2 (25G332) and 26.7.3 (25G342). `tools/check_patterns.py` is replaced by `tools/port.py --check`.
 - **0.2.1**: first release. False UHE restart fix, dynamic connectable/scannable advertising (both connection paths, `ADV_SCAN_IND` interval raised to `0xA0`), connection to the iPhone's current RPA. Instant Hotspot works.
 - **0.2.0** (not released): only one of the two `LE_Create_Connection` paths was hooked, and fast scannable advertising was rejected with `0x12`.
 - **0.1.0** (not released): always advertised `ADV_SCAN_IND`. Replaced by the dynamic switch so the Mac stays connectable when idle.
@@ -274,6 +303,8 @@ Keep a working EFI backup, and keep a reliable way to disable the plugin: the `-
 ## Credits
 
 - Acidanthera for Lilu, MacKernelSDK, BrcmPatchRAM and BlueToolFixup
+- Bosca27 for the port to macOS 26.7.2 and all testing on the Fenvi T919 (AirDrop with iOS 27.2, Instant Hotspot, Apple Watch); the 0.3.0 porting tools were written with Claude Code (Anthropic)
+- KGP / Klaus (OCLP-CustoMac) for the request to make the patching independent of the macOS build
 - [CommandMaker](https://github.com/acidanthera/BrcmPatchRAM/pull/37) for independently identifying the UHE check on non-Apple Broadcom cards
 - FeatureUnlock and RealtekUVCFix as reference implementations for runtime page patching
 

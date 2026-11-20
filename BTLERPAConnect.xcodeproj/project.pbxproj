@@ -435,7 +435,7 @@
 				MODULE_NAME = com.trungkien.BTLERPAConnect;
 				MODULE_START = "$(PRODUCT_NAME)_kern_start";
 				MODULE_STOP = "$(PRODUCT_NAME)_kern_stop";
-				MODULE_VERSION = 0.2.1;
+				MODULE_VERSION = 0.3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.trungkien.BTLERPAConnect;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				WRAPPER_EXTENSION = kext;
@@ -461,7 +461,7 @@
 				MODULE_NAME = com.trungkien.BTLERPAConnect;
 				MODULE_START = "$(PRODUCT_NAME)_kern_start";
 				MODULE_STOP = "$(PRODUCT_NAME)_kern_stop";
-				MODULE_VERSION = 0.2.1;
+				MODULE_VERSION = 0.3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.trungkien.BTLERPAConnect;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				WRAPPER_EXTENSION = kext;

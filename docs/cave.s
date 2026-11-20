@@ -1,13 +1,19 @@
-# BTLERPAConnect code cave for /usr/sbin/bluetoothd 25G72 (x86_64).
-# Placed at CAVE in the zero padding after __eh_frame (after BTLEAdvFix's
-# routine, which ends at 0x100aa2424). Build the bytes with:
-#   clang -c -arch x86_64 docs/cave.s -o cave.o
-#   ld -arch x86_64 -preload -e base -segaddr __TEXT 0x100aa2440 cave.o -o cave.bin
-# and copy the __text bytes into caveReplacement in kern_start.cpp
-# (tools/check_patterns.py verifies they match).
+# BTLERPAConnect routines for /usr/sbin/bluetoothd (x86_64), build independent.
 #
-# Data in the unused tail of __DATA (after __common, which ends at
-# 0x100b52e30; __DATA ends at 0x100b53000):
+# Placed in the zero padding after __eh_frame, at __eh_frame + 0x180 (the
+# range before it belongs to BTLEAdvFix's routine). tools/port.py finds the
+# build-specific addresses by signature and passes them in:
+#
+#   CAVE              where this code is placed
+#   ADV_TYPE          legacy advertising type requested by bluetoothd
+#   CONN_IN_PROGRESS  lConnectionInProgress (LE_CreateConn pending)
+#   SILENT_RESTART    stop + resend params + enable, if advertising
+#   TABLE             start of the state below
+#
+# The stack slots used by connectStart (-0x40) and connComplete (-0xa8) are
+# part of the signatures in port.py: a build that moves them is not ported.
+#
+# State in the unused, zero-filled tail of __DATA (after the last section):
 #   TABLE     16 entries x 24 bytes, identity -> RPA
 #     +0  identity address (type byte + 6 bytes, as stored by bluetoothd)
 #     +7  last RPA seen for it (type 1 + 6 bytes), written by LE_ResolveAddress
@@ -15,15 +21,12 @@
 #   LINKS     number of LE links up
 #   CUR_TYPE  advertising type last sent to the controller
 
-.set CAVE,              0x100aa2440
-.set ADV_TYPE,          0x100b294f4   # legacy advertising type requested by bluetoothd
-.set CONN_IN_PROGRESS,  0x100b30cf0   # lConnectionInProgress (LE_CreateConn pending)
-.set SILENT_RESTART,    0x1001f6d42   # stop + resend params + enable, if advertising
-.set TABLE,             0x100b52e40
+# The addresses in the comments below are those of 25G72, kept as a guide.
+
 .set ENTRIES,           16
 .set ENTRY,             24
-.set LINKS,             0x100b52fc0
-.set CUR_TYPE,          0x100b52fc1
+.set LINKS,             TABLE + ENTRIES * ENTRY
+.set CUR_TYPE,          LINKS + 1
 
 .text
 .globl base
